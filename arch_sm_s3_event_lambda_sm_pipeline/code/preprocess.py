@@ -111,7 +111,7 @@ if __name__ == "__main__":
 
     logger.info("Splitting %d rows of data into train, validation, test datasets.", len(transformed_data))
 
-    np.random.shuffle(transformed_data)
+    transformed_data = transformed_data.sample(frac=1)
 
     train, validation, test = np.split(
         transformed_data,
