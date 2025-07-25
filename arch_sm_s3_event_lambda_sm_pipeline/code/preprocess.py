@@ -1,6 +1,6 @@
 import argparse
 import logging
-import glob
+from glob import glob
 import os
 
 import pandas as pd
