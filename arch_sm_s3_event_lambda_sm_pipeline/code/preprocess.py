@@ -1,46 +1,21 @@
 import argparse
 import logging
-import pathlib
 import glob
 import os
 
-import numpy as np
 import pandas as pd
+import numpy as np
 
+from sklearn.preprocessing import (
+    OneHotEncoder,
+    StandardScaler,
+    OrdinalEncoder
+)
 from sklearn.compose import ColumnTransformer
-from sklearn.impute import SimpleImputer
-from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import StandardScaler, OneHotEncoder
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 logger.addHandler(logging.StreamHandler())
-
-
-# Since we get a headerless CSV file we specify the column names here.
-feature_columns_names = [
-    "sex",
-    "length",
-    "diameter",
-    "height",
-    "whole_weight",
-    "shucked_weight",
-    "viscera_weight",
-    "shell_weight",
-]
-label_column = "rings"
-
-feature_columns_dtype = {
-    "sex": str,
-    "length": np.float64,
-    "diameter": np.float64,
-    "height": np.float64,
-    "whole_weight": np.float64,
-    "shucked_weight": np.float64,
-    "viscera_weight": np.float64,
-    "shell_weight": np.float64,
-}
-label_column_dtype = {"rings": np.float64}
 
 
 if __name__ == "__main__":
@@ -48,63 +23,104 @@ if __name__ == "__main__":
     logger.debug("Starting preprocessing.")
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--input-data", type=str, default="/opt/ml/processing/input/input_data")
+    parser.add_argument(
+        "--input-data",
+        type=str,
+        default="/opt/ml/processing/input/input_data"
+    )
+    parser.add_argument(
+        "--baser-dir",
+        type=str,
+        default="/opt/ml/processing"
+    )
     args = parser.parse_args()
 
-    base_dir = "/opt/ml/processing"
-
     input_data = args.input_data
+    base_dir = args.base_dir
 
     logger.info(f"Loading data from: {input_data}")
 
-    file_list = glob.glob(os.path.join(input_data, "*.csv"))
-    common_read_args = {
-        "header": None,
-        "names": feature_columns_names + [label_column],
-        "dtype": feature_columns_dtype.copy().update(label_column_dtype)
-    }
-    df = pd.concat((pd.read_csv(file, **common_read_args) for file in file_list), ignore_index=True)
+    csv_files = glob(os.path.join(input_data, "*.csv"))
+
+    if len(csv_files) == 1:
+        df = pd.read_csv(csv_files[0])
+    elif len(csv_files) > 1:
+        df = pd.concat([pd.read_csv(file) for file in csv_files])
+    else:
+        raise ValueError("Zero csv files were found. Check at least one CSV is present in the respective folder") 
+
+    df.drop("LoanID", inplace=True, axis=1)
 
     logger.debug("Defining transformers.")
 
-    numeric_features = list(feature_columns_names)
-    numeric_features.remove("sex")
-    categorical_features = ["sex"]
+    # Defining the variables and expected values 
+    # to transform (ordinal, nominal and numeric variables)
+    ordinal_var = {
+        "Education": [["High School", "Bachelor's", "Master's", "PhD"]],
+        "EmploymentType": [['Unemployed', 'Part-time', 'Self-employed', 'Full-time']]
+    }
+    nominal_var = ["MaritalStatus", "LoanPurpose", "HasMortgage", "HasDependents", "HasCoSigner"]
+    numeric_var = ['Age', 'Income', 'LoanAmount', 'CreditScore', 'MonthsEmployed', 'NumCreditLines', 'InterestRate', 'LoanTerm', 'DTIRatio']
 
-    numeric_transformer = Pipeline(
-        steps=[
-            ("imputer", SimpleImputer(strategy="median")),
-            ("scaler", StandardScaler()),
-        ]
+
+    # Defining encoding to ordinal variables
+    ordinal_pipeline = []
+    for var_name, var_labels in ordinal_var.items():
+        encoder = OrdinalEncoder(
+            categories=var_labels,
+            handle_unknown='use_encoded_value',
+            unknown_value=-1,
+            dtype="int16"
+        )
+        encoder_transformer = (var_name[:3].lower(), encoder, [var_name])
+        ordinal_pipeline.append(encoder_transformer)
+
+    # Defining encoding to nominal variables
+    one_hot_encoder = OneHotEncoder(
+        drop="first",
+        handle_unknown="ignore",
+        sparse_output=False, dtype="int8"
     )
-    categorical_transformer = Pipeline(
-        steps=[
-            ("imputer", SimpleImputer(strategy="constant", fill_value="missing")),
-            ("onehot", OneHotEncoder(handle_unknown="ignore")),
-        ]
-    )
-    preprocess = ColumnTransformer(
-        transformers=[
-            ("num", numeric_transformer, numeric_features),
-            ("cat", categorical_transformer, categorical_features),
-        ]
+
+    # Defining encoding to transform numeric variables
+    standarization = StandardScaler()
+
+
+    # Pipeline (ordinal + nominal [One Hot Encoder] + numeric [Standarization])
+    transformer_pipeline = ordinal_pipeline
+    transformer_pipeline += [
+        ("ohe", one_hot_encoder, nominal_var),
+        ("standarization", standarization, numeric_var)
+    ]
+
+    transformer = ColumnTransformer(
+        transformers=transformer_pipeline,
+        remainder='passthrough',
+        verbose_feature_names_out=True
     )
 
     logger.info("Applying transforms.")
+    transformed_data = transformer.fit_transform(df)
 
-    y = df.pop("rings")
-    X_pre = preprocess.fit_transform(df)
-    y_pre = y.to_numpy().reshape(len(y), 1)
+    transformed_data = pd.DataFrame(
+        transformed_data,
+        columns=transformer.get_feature_names_out()
+    )
+    y = transformed_data.pop("remainder__Default").astype("int8")
+    transformed_data = pd.concat([y, transformed_data], axis=1)
 
-    X = np.concatenate((y_pre, X_pre), axis=1)
+    logger.info("Splitting %d rows of data into train, validation, test datasets.", len(transformed_data))
 
-    logger.info("Splitting %d rows of data into train, validation, test datasets.", len(X))
+    np.random.shuffle(transformed_data)
 
-    np.random.shuffle(X)
-    train, validation, test = np.split(X, [int(0.7 * len(X)), int(0.85 * len(X))])
+    train, validation, test = np.split(
+        transformed_data,
+        [int(0.7 * len(transformed_data)), int(0.85 * len(transformed_data))]
+    )
 
     logger.info("Writing out datasets to %s.", base_dir)
 
+    #transformed_data.to_parquet("../data/processed/processed_data.parquet", index=False)
     pd.DataFrame(train).to_csv(f"{base_dir}/train/train.csv", header=False, index=False)
     pd.DataFrame(validation).to_csv(f"{base_dir}/validation/validation.csv", header=False, index=False)
     pd.DataFrame(test).to_csv(f"{base_dir}/test/test.csv", header=False, index=False)
