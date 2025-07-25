@@ -29,7 +29,7 @@ if __name__ == "__main__":
         default="/opt/ml/processing/input/input_data"
     )
     parser.add_argument(
-        "--baser-dir",
+        "--base-dir",
         type=str,
         default="/opt/ml/processing"
     )
